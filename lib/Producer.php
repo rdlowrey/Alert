@@ -4,7 +4,7 @@ namespace Amp;
 
 final class Producer implements Iterator
 {
-    use CallableMaker, Internal\Producer;
+    use Internal\Producer;
 
     /**
      * @param callable(callable(mixed $value): Promise $emit): \Generator $producer

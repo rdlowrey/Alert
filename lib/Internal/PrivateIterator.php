@@ -6,26 +6,38 @@ use Amp\Iterator;
 use Amp\Promise;
 
 /**
- * Wraps an Iterator instance that has public methods to emit, complete, and fail into an object that only allows
- * access to the public API methods.
+ * Wraps a set of callables that implement the iterator methods.
  */
 class PrivateIterator implements Iterator
 {
-    /** @var \Amp\Iterator */
-    private $iterator;
+    /** @var callable */
+    private $advance;
 
-    public function __construct(Iterator $iterator)
+    /** @var callable */
+    private $current;
+
+    /** @var callable */
+    private $dispose;
+
+    public function __construct(callable $advance, callable $current, callable $dispose)
     {
-        $this->iterator = $iterator;
+        $this->advance = $advance;
+        $this->current = $current;
+        $this->dispose = $dispose;
+    }
+
+    public function __destruct()
+    {
+        ($this->dispose)();
     }
 
     public function advance(): Promise
     {
-        return $this->iterator->advance();
+        return ($this->advance)();
     }
 
     public function getCurrent()
     {
-        return $this->iterator->getCurrent();
+        return ($this->current)();
     }
 }

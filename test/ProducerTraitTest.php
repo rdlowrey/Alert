@@ -17,6 +17,8 @@ class Producer
         emit as public;
         complete as public;
         fail as public;
+        advance as public;
+        getCurrent as public;
     }
 }
 
@@ -236,5 +238,34 @@ class ProducerTraitTest extends TestCase
     {
         $this->producer->complete();
         $this->producer->complete();
+    }
+
+    public function testDestroyingIteratorRelievesBackPressure()
+    {
+        $iterator = $this->producer->iterate();
+        $invoked = 0;
+        $onResolved = function () use (&$invoked) {
+            $invoked++;
+        };
+        foreach (\range(1, 5) as $value) {
+            $promise = $this->producer->emit($value);
+            $promise->onResolve($onResolved);
+        }
+        $this->assertSame(0, $invoked);
+        unset($iterator);
+        $this->assertSame(5, $invoked);
+    }
+    /**
+     * @depends testDestroyingIteratorRelievesBackPressure
+     */
+    public function testEmitAfterDisposal()
+    {
+        Loop::run(function () {
+            $iterator = $this->producer->iterate();
+            unset($iterator);
+
+            // Assert promise is already resolved.
+            $this->assertNull(yield Promise\timeout($this->producer->emit(1), 1));
+        });
     }
 }

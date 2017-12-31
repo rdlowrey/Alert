@@ -2,8 +2,10 @@
 
 namespace Amp\Internal;
 
+use Amp\CallableMaker;
 use Amp\Deferred;
 use Amp\Failure;
+use Amp\Iterator;
 use Amp\Promise;
 use Amp\Success;
 use React\Promise\PromiseInterface as ReactPromise;
@@ -18,6 +20,8 @@ use React\Promise\PromiseInterface as ReactPromise;
  */
 trait Producer
 {
+    use CallableMaker;
+
     /** @var \Amp\Promise|null */
     private $complete;
 
@@ -27,63 +31,40 @@ trait Producer
     /** @var \Amp\Deferred[] */
     private $backPressure = [];
 
+    /** @var \Amp\Deferred|null */
+    private $waiting;
+
     /** @var int */
     private $position = -1;
 
-    /** @var \Amp\Deferred|null */
-    private $waiting;
+    /** @var bool */
+    private $disposed = false;
+
+    /** @var int */
+    private $refCount = 0;
 
     /** @var null|array */
     private $resolutionTrace;
 
     /**
-     * {@inheritdoc}
+     * Returns an iterator instance that when destroyed fails the producer with an instance of \Amp\DisposedException.
+     *
+     * @return \Amp\Iterator
      */
-    public function advance(): Promise
+    public function iterate(): Iterator
     {
-        if ($this->waiting !== null) {
-            throw new \Error("The prior promise returned must resolve before invoking this method again");
-        }
-
-        if (isset($this->backPressure[$this->position])) {
-            $future = $this->backPressure[$this->position];
-            unset($this->values[$this->position], $this->backPressure[$this->position]);
-            $future->resolve();
-        }
-
-        ++$this->position;
-
-        if (\array_key_exists($this->position, $this->values)) {
-            return new Success(true);
-        }
-
-        if ($this->complete) {
-            return $this->complete;
-        }
-
-        $this->waiting = new Deferred;
-        return $this->waiting->promise();
+        $this->disposed = false;
+        ++$this->refCount;
+        return new PrivateIterator(
+            $this->callableFromInstanceMethod("advance"),
+            $this->callableFromInstanceMethod("getCurrent"),
+            $this->callableFromInstanceMethod("dispose")
+        );
     }
 
     /**
-     * {@inheritdoc}
-     */
-    public function getCurrent()
-    {
-        if (empty($this->values) && $this->complete) {
-            throw new \Error("The iterator has completed");
-        }
-
-        if (!\array_key_exists($this->position, $this->values)) {
-            throw new \Error("Promise returned from advance() must resolve before calling this method");
-        }
-
-        return $this->values[$this->position];
-    }
-
-    /**
-     * Emits a value from the iterator. The returned promise is resolved with the emitted value once all listeners
-     * have been invoked.
+     * Emits a value from the iterator. The returned promise is resolved with the emitted value once it has been
+     * consumed.
      *
      * @param mixed $value
      *
@@ -95,6 +76,10 @@ trait Producer
     {
         if ($this->complete) {
             throw new \Error("Iterators cannot emit values after calling complete");
+        }
+
+        if ($this->disposed) {
+            return new Success;
         }
 
         if ($value instanceof ReactPromise) {
@@ -133,6 +118,64 @@ trait Producer
         }
 
         return $pressure->promise();
+    }
+
+    public function advance(): Promise
+    {
+        if ($this->waiting !== null) {
+            throw new \Error("The prior promise returned must resolve before invoking this method again");
+        }
+
+        if (isset($this->backPressure[$this->position])) {
+            $deferred = $this->backPressure[$this->position];
+            unset($this->backPressure[$this->position]);
+            $deferred->resolve();
+        }
+
+        unset($this->values[$this->position]);
+
+        ++$this->position;
+
+        if (\array_key_exists($this->position, $this->values)) {
+            return new Success(true);
+        }
+
+        if ($this->complete) {
+            return $this->complete;
+        }
+
+        $this->waiting = new Deferred;
+        return $this->waiting->promise();
+    }
+
+    public function getCurrent()
+    {
+        if (empty($this->values) && $this->complete) {
+            throw new \Error("The iterator has completed");
+        }
+
+        if (!\array_key_exists($this->position, $this->values)) {
+            throw new \Error("Promise returned from advance() must resolve before calling this method");
+        }
+
+        return $this->values[$this->position];
+    }
+
+    private function dispose()
+    {
+        if (--$this->refCount !== 0) {
+            return;
+        }
+
+        $this->disposed = true;
+
+        if ($this->backPressure) {
+            for ($key = \key($this->backPressure); isset($this->backPressure[$key]); $key++) {
+                $deferred = $this->backPressure[$key];
+                unset($this->values[$key], $this->backPressure[$key]);
+                $deferred->resolve();
+            }
+        }
     }
 
     /**
