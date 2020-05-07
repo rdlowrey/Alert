@@ -217,16 +217,24 @@ namespace Amp\Promise
         }
 
         $resolved = false;
+        $running = false;
 
         try {
-            Loop::run(function () use (&$resolved, &$value, &$exception, $promise) {
-                $promise->onResolve(function ($e, $v) use (&$resolved, &$value, &$exception) {
+            $promise->onResolve(function ($e, $v) use (&$resolved, &$value, &$exception, &$running) {
+                if ($running) {
                     Loop::stop();
-                    $resolved = true;
-                    $exception = $e;
-                    $value = $v;
-                });
+                }
+
+                $resolved = true;
+                $exception = $e;
+                $value = $v;
             });
+
+            $running = true;
+
+            while (!$resolved && Loop::getInfo()['enabled_watchers']['referenced'] > 0) {
+                Loop::run();
+            }
         } catch (\Throwable $throwable) {
             throw new \Error("Loop exceptionally stopped without resolving the promise", 0, $throwable);
         }
