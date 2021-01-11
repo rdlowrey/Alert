@@ -2,7 +2,6 @@
 
 namespace Amp
 {
-
     use React\Promise\PromiseInterface as ReactPromise;
 
     /**
@@ -146,8 +145,8 @@ namespace Amp
 
 namespace Amp\Promise
 {
-
     use Amp\Deferred;
+    use Amp\Failure;
     use Amp\Loop;
     use Amp\MultiReasonException;
     use Amp\Promise;
@@ -184,6 +183,49 @@ namespace Amp\Promise
                 throw $exception;
             }
         });
+    }
+
+    /**
+     * Returns a successful promise using the given value, which can be anything other than a promise. This function
+     * optimizes the case where null is used as the value, always returning the same object.
+     *
+     * @template TValue
+     *
+     * @param mixed $value Anything other than a Promise object.
+     *
+     * @psalm-param TValue $value
+     *
+     * @return Promise
+     *
+     * @psalm-return Promise<TValue>
+     *
+     * @throws \Error If a promise is given as the value.
+     */
+    function succeed($value = null): Promise
+    {
+        static $empty;
+
+        if ($value === null) {
+            return $empty ?? ($empty = new Success);
+        }
+
+        return new Success($value);
+    }
+
+    /**
+     * Returns a failed promise using the given exception.
+     *
+     * @template TValue
+     *
+     * @param \Throwable $exception
+     *
+     * @return Promise
+     *
+     * @psalm-return Promise<TValue>
+     */
+    function fail(\Throwable $exception): Promise
+    {
+        return new Failure($exception);
     }
 
     /**
@@ -584,10 +626,10 @@ namespace Amp\Promise
 
 namespace Amp\Iterator
 {
-
     use Amp\Delayed;
     use Amp\Emitter;
     use Amp\Iterator;
+    use Amp\Pipeline;
     use Amp\Producer;
     use Amp\Promise;
     use function Amp\call;
@@ -722,50 +764,13 @@ namespace Amp\Iterator
             }
         }
 
-        $emitter = new Emitter;
-        $previous = [];
-        $promise = Promise\all($previous);
-
-        $coroutine = coroutine(static function (Iterator $iterator, callable $emit) {
-            while (yield $iterator->advance()) {
-                yield $emit($iterator->getCurrent());
+        return new Producer(function (callable $emit) use ($iterators) {
+            foreach ($iterators as $iterator) {
+                while (yield $iterator->advance()) {
+                    yield $emit($iterator->getCurrent());
+                }
             }
         });
-
-        foreach ($iterators as $iterator) {
-            $emit = coroutine(static function ($value) use ($emitter, $promise) {
-                static $pending = true, $failed = false;
-
-                if ($failed) {
-                    return;
-                }
-
-                if ($pending) {
-                    try {
-                        yield $promise;
-                        $pending = false;
-                    } catch (\Throwable $exception) {
-                        $failed = true;
-                        return; // Prior iterator failed.
-                    }
-                }
-
-                yield $emitter->emit($value);
-            });
-            $previous[] = $coroutine($iterator, $emit);
-            $promise = Promise\all($previous);
-        }
-
-        $promise->onResolve(static function ($exception) use ($emitter) {
-            if ($exception) {
-                $emitter->fail($exception);
-                return;
-            }
-
-            $emitter->complete();
-        });
-
-        return $emitter->iterate();
     }
 
     /**
@@ -803,11 +808,11 @@ namespace Amp\Iterator
      * @psalm-param Iterator<TValue> $iterator
      *
      * @return Promise
-     * @psalm-return Promise<array<array-key, TValue>>
+     * @psalm-return Promise<array<int, TValue>>
      */
     function toArray(Iterator $iterator): Promise
     {
-        return call(static function () use ($iterator) {
+        return call(static function () use ($iterator): \Generator {
             /** @psalm-var list $array */
             $array = [];
 
@@ -816,6 +821,265 @@ namespace Amp\Iterator
             }
 
             return $array;
+        });
+    }
+
+    /**
+     * @template TValue
+     *
+     * @param Pipeline $stream
+     *
+     * @psalm-param Pipeline<TValue> $pipeline
+     *
+     * @return Iterator
+     *
+     * @psalm-return Iterator<TValue>
+     */
+    function fromPipeline(Pipeline $stream): Iterator
+    {
+        return new Producer(function (callable $emit) use ($stream): \Generator {
+            while (null !== $value = yield $stream->continue()) {
+                yield $emit($value);
+            }
+        });
+    }
+}
+
+namespace Amp\Pipeline
+{
+    use Amp\AsyncGenerator;
+    use Amp\Delayed;
+    use Amp\Iterator;
+    use Amp\Pipeline;
+    use Amp\PipelineSource;
+    use Amp\Promise;
+    use React\Promise\PromiseInterface as ReactPromise;
+    use function Amp\call;
+    use function Amp\coroutine;
+    use function Amp\Internal\createTypeError;
+
+    /**
+     * Creates a pipeline from the given iterable, emitting the each value. The iterable may contain promises. If any
+     * promise fails, the returned pipeline will fail with the same reason.
+     *
+     * @template TValue
+     *
+     * @param array|\Traversable $iterable Elements to emit.
+     * @param int                $delay Delay between elements emitted in milliseconds.
+     *
+     * @psalm-param iterable<TValue> $iterable
+     *
+     * @return Pipeline
+     *
+     * @psalm-return Pipeline<TValue>
+     *
+     * @throws \TypeError If the argument is not an array or instance of \Traversable.
+     */
+    function fromIterable(/* iterable */
+        $iterable,
+        int $delay = 0
+    ): Pipeline {
+        if (!$iterable instanceof \Traversable && !\is_array($iterable)) {
+            throw createTypeError(["array", "Traversable"], $iterable);
+        }
+
+        return new AsyncGenerator(static function (callable $yield) use ($iterable, $delay) {
+            foreach ($iterable as $value) {
+                if ($delay) {
+                    yield new Delayed($delay);
+                }
+
+                if ($value instanceof Promise || $value instanceof ReactPromise) {
+                    $value = yield $value;
+                }
+
+                yield $yield($value);
+            }
+        });
+    }
+
+    /**
+     * @template TValue
+     * @template TReturn
+     *
+     * @param Pipeline $stream
+     * @param callable(TValue $value):TReturn $onEmit
+     *
+     * @psalm-param Pipeline<TValue> $pipeline
+     *
+     * @return Pipeline
+     *
+     * @psalm-return Pipeline<TReturn>
+     */
+    function map(Pipeline $stream, callable $onEmit): Pipeline
+    {
+        return new AsyncGenerator(static function (callable $yield) use ($stream, $onEmit) {
+            while (null !== $value = yield $stream->continue()) {
+                yield $yield(yield call($onEmit, $value));
+            }
+        });
+    }
+
+    /**
+     * @template TValue
+     *
+     * @param Pipeline $stream
+     * @param callable(TValue $value):bool $filter
+     *
+     * @psalm-param Pipeline<TValue> $pipeline
+     *
+     * @return Pipeline
+     *
+     * @psalm-return Pipeline<TValue>
+     */
+    function filter(Pipeline $stream, callable $filter): Pipeline
+    {
+        return new AsyncGenerator(static function (callable $yield) use ($stream, $filter) {
+            while (null !== $value = yield $stream->continue()) {
+                if (yield call($filter, $value)) {
+                    yield $yield($value);
+                }
+            }
+        });
+    }
+
+    /**
+     * Creates a pipeline that emits values emitted from any pipeline in the array of streams.
+     *
+     * @param Pipeline[] $streams
+     *
+     * @return Pipeline
+     */
+    function merge(array $streams): Pipeline
+    {
+        $source = new PipelineSource;
+        $result = $source->pipe();
+
+        $coroutine = coroutine(static function (Pipeline $stream) use (&$source) {
+            while ((null !== $value = yield $stream->continue()) && $source !== null) {
+                yield $source->emit($value);
+            }
+        });
+
+        $coroutines = [];
+        foreach ($streams as $stream) {
+            if (!$stream instanceof Pipeline) {
+                throw createTypeError([Pipeline::class], $stream);
+            }
+
+            $coroutines[] = $coroutine($stream);
+        }
+
+        Promise\all($coroutines)->onResolve(static function ($exception) use (&$source) {
+            $temp = $source;
+            $source = null;
+
+            if ($exception) {
+                $temp->fail($exception);
+            } else {
+                $temp->complete();
+            }
+        });
+
+        return $result;
+    }
+
+    /**
+     * Concatenates the given streams into a single pipeline, emitting from a single pipeline at a time. The
+     * prior pipeline must complete before values are emitted from any subsequent streams. Streams are concatenated
+     * in the order given (iteration order of the array).
+     *
+     * @param Pipeline[] $streams
+     *
+     * @return Pipeline
+     */
+    function concat(array $streams): Pipeline
+    {
+        foreach ($streams as $stream) {
+            if (!$stream instanceof Pipeline) {
+                throw createTypeError([Pipeline::class], $stream);
+            }
+        }
+
+        return new AsyncGenerator(function (callable $emit) use ($streams) {
+            foreach ($streams as $stream) {
+                while ($value = yield $stream->continue()) {
+                    yield $emit($value);
+                }
+            }
+        });
+    }
+
+    /**
+     * Discards all remaining items and returns the number of discarded items.
+     *
+     * @template TValue
+     *
+     * @param Pipeline $stream
+     *
+     * @psalm-param Pipeline<TValue> $pipeline
+     *
+     * @return Promise<int>
+     */
+    function discard(Pipeline $stream): Promise
+    {
+        return call(static function () use ($stream): \Generator {
+            $count = 0;
+
+            while (null !== yield $stream->continue()) {
+                $count++;
+            }
+
+            return $count;
+        });
+    }
+
+    /**
+     * Collects all items from a pipeline into an array.
+     *
+     * @template TValue
+     *
+     * @param Pipeline $stream
+     *
+     * @psalm-param Pipeline<TValue> $pipeline
+     *
+     * @return Promise
+     *
+     * @psalm-return Promise<array<int, TValue>>
+     */
+    function toArray(Pipeline $stream): Promise
+    {
+        return call(static function () use ($stream): \Generator {
+            /** @psalm-var list<TValue> $array */
+            $array = [];
+
+            while (null !== $value = yield $stream->continue()) {
+                $array[] = $value;
+            }
+
+            return $array;
+        });
+    }
+
+    /**
+     * Converts an instance of the deprecated {@see Iterator} into an instance of {@see Pipeline}.
+     *
+     * @template TValue
+     *
+     * @param Iterator $iterator
+     *
+     * @psalm-param Iterator<TValue> $iterator
+     *
+     * @return Pipeline
+     *
+     * @psalm-return Pipeline<TValue>
+     */
+    function fromIterator(Iterator $iterator): Pipeline
+    {
+        return new AsyncGenerator(function (callable $yield) use ($iterator): \Generator {
+            while (yield $iterator->advance()) {
+                yield $yield($iterator->getCurrent());
+            }
         });
     }
 }

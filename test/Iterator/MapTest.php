@@ -1,12 +1,13 @@
 <?php
 
-namespace Amp\Test;
+namespace Amp\Test\Iterator;
 
 use Amp\Emitter;
 use Amp\Iterator;
 use Amp\Loop;
 use Amp\PHPUnit\TestException;
 use Amp\Producer;
+use Amp\Test\BaseTest;
 
 class MapTest extends BaseTest
 {

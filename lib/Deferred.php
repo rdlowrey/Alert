@@ -23,6 +23,7 @@ final class Deferred
             use Internal\Placeholder {
                 resolve as public;
                 fail as public;
+                isResolved as public;
             }
         };
 
@@ -35,6 +36,15 @@ final class Deferred
     public function promise(): Promise
     {
         return $this->promise;
+    }
+
+    /**
+     * @return bool True if the contained promise has been resolved.
+     */
+    public function isResolved(): bool
+    {
+        /** @psalm-suppress UndefinedInterfaceMethod */
+        return $this->resolver->isResolved();
     }
 
     /**

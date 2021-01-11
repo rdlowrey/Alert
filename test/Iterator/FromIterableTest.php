@@ -1,6 +1,6 @@
 <?php
 
-namespace Amp\Test;
+namespace Amp\Test\Iterator;
 
 use Amp\Delayed;
 use Amp\Failure;
@@ -8,8 +8,9 @@ use Amp\Iterator;
 use Amp\Loop;
 use Amp\PHPUnit\TestException;
 use Amp\Success;
+use Amp\Test\BaseTest;
 
-class IteratorFromIterableTest extends BaseTest
+class FromIterableTest extends BaseTest
 {
     const TIMEOUT = 10;
 
@@ -92,11 +93,12 @@ class IteratorFromIterableTest extends BaseTest
     }
 
     /**
-     * @expectedException \TypeError
      * @dataProvider provideInvalidIteratorArguments
      */
     public function testInvalid($arg)
     {
+        $this->expectException(\TypeError::class);
+
         Iterator\fromIterable($arg);
     }
 
